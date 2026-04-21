@@ -286,6 +286,33 @@ def find_end_candidates(hits: List[OCRHit], threshold: int = 2) -> List[Tuple[fl
     return out
 
 
+def validate_start_with_chat(video_path: str, start_t: float, chat_box: Tuple[float, float, float, float], tesseract_cmd: Optional[str], window: float = 90.0, sample_seconds: float = 3.0) -> bool:
+    """Return True if 'leader' appears in chat within window seconds after start_t."""
+    try:
+        container = av.open(video_path)
+        stream = next(s for s in container.streams if s.type == "video")
+        check_to = start_t + window
+        next_t = max(0.0, start_t - 10.0)
+        for frame in container.decode(video=stream.index):
+            if frame.pts is None or frame.time_base is None:
+                continue
+            t = float(frame.pts * frame.time_base)
+            if t < next_t:
+                continue
+            if t > check_to:
+                break
+            chat_img = crop_region(frame.to_image(), *chat_box).convert("L")
+            text = pytesseract.image_to_string(chat_img, config="--oem 3 --psm 6") or ""
+            if "leader" in normalize_text(text):
+                container.close()
+                return True
+            next_t = t + sample_seconds
+        container.close()
+        return False
+    except Exception:
+        return True
+
+
 def find_timer_start_candidates(hits: List[OCRHit], low: int = 17 * 60 + 28, high: int = 17 * 60 + 30) -> List[Tuple[float, str]]:
     """Game start: timer reads 17:28–17:30."""
     out: List[Tuple[float, str]] = []
@@ -443,6 +470,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--timer-top", type=float, default=0.0, help="Timer crop: top edge as fraction of frame height")
     p.add_argument("--timer-right", type=float, default=0.72, help="Timer crop: right edge as fraction of frame width")
     p.add_argument("--timer-bottom", type=float, default=0.028, help="Timer crop: bottom edge as fraction of frame height")
+    p.add_argument("--chat-left", type=float, default=0.054)
+    p.add_argument("--chat-top", type=float, default=0.262)
+    p.add_argument("--chat-right", type=float, default=0.270)
+    p.add_argument("--chat-bottom", type=float, default=0.636)
     p.add_argument("--timer-start-low", type=int, default=17 * 60 + 20, help="Game start: timer lower bound in seconds (default 17:20=1040)")
     p.add_argument("--timer-start-high", type=int, default=17 * 60 + 35, help="Game start: timer upper bound in seconds (default 17:35=1055)")
     p.add_argument("--timer-end-threshold", type=int, default=15, help="Game end: timer at or below this many seconds (default 15)")
@@ -501,7 +532,19 @@ def main() -> int:
 
     print(f"[INFO] Raw start candidates: {len(start_candidates)}")
     print(f"[INFO] Raw end candidates: {len(end_candidates)}")
-    print(f"[INFO] Start clusters: {len(start_clusters)}")
+    print(f"[INFO] Start clusters before chat validation: {len(start_clusters)}")
+
+    chat_box = (args.chat_left, args.chat_top, args.chat_right, args.chat_bottom)
+    validated = []
+    for t, txt in start_clusters:
+        print(f"  [CHECK] {sec_to_hms(t)} — scanning chat for 'leader'...")
+        ok = validate_start_with_chat(args.input, t, chat_box, tesseract_cmd)
+        print(f"    -> {'CONFIRMED' if ok else 'REJECTED (no leader in chat, likely reconnection)'}")
+        if ok:
+            validated.append((t, txt))
+    start_clusters = validated
+
+    print(f"[INFO] Start clusters after chat validation: {len(start_clusters)}")
     print(f"[INFO] End clusters: {len(end_clusters)}")
     for i, (t, txt) in enumerate(start_clusters[:10], start=1):
         print(f"  [START {i}] {sec_to_hms(t)} | {txt.replace(chr(10), ' | ')[:180]}")
