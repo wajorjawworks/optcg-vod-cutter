@@ -248,15 +248,20 @@ def main() -> int:
         slug = leaders_to_slug(leaders)
         print(f"  Leaders: {' vs '.join(leaders) if leaders else 'unknown'}")
 
-        # Rename the clip
-        old_clip = os.path.join(args.output_dir, f"game_{idx:02d}.mp4")
+        # Find the clip — accept game_NN.mp4 or any already-renamed game_NN_*.mp4
         new_clip = os.path.join(args.output_dir, f"game_{idx:02d}_{slug}.mp4")
-        if os.path.isfile(old_clip):
-            os.rename(old_clip, new_clip)
+        exact = os.path.join(args.output_dir, f"game_{idx:02d}.mp4")
+        existing = sorted(Path(args.output_dir).glob(f"game_{idx:02d}*.mp4"))
+        if os.path.isfile(exact):
+            os.rename(exact, new_clip)
             print(f"  Renamed clip: game_{idx:02d}.mp4 -> {os.path.basename(new_clip)}")
+        elif existing and str(existing[0]) != new_clip:
+            os.rename(str(existing[0]), new_clip)
+            print(f"  Renamed clip: {existing[0].name} -> {os.path.basename(new_clip)}")
+        elif os.path.isfile(new_clip):
+            print(f"  Clip already named correctly: {os.path.basename(new_clip)}")
         else:
-            print(f"  [WARN] Clip not found: {old_clip}")
-            new_clip = old_clip
+            print(f"  [WARN] No clip found for game {idx:02d}")
 
         # Copy the log with matching name
         dest_log = os.path.join(args.output_dir, f"game_{idx:02d}_{slug}.log")
