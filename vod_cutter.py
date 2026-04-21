@@ -86,6 +86,17 @@ def normalize_text(text: str) -> str:
     return text
 
 
+def parse_timer_seconds(text: str) -> Optional[int]:
+    """Parse MM:SS from noisy OCR of the in-game countdown timer."""
+    text = text.replace("O", "0").replace("o", "0").replace("l", "1").replace("I", "1")
+    m = re.search(r'(\d{1,2})[:\s](\d{2})', text)
+    if m:
+        mins, secs = int(m.group(1)), int(m.group(2))
+        if 0 <= mins <= 17 and 0 <= secs <= 59:
+            return mins * 60 + secs
+    return None
+
+
 def sec_to_hms(seconds: float) -> str:
     seconds = max(0.0, seconds)
     total_ms = int(round(seconds * 1000))
@@ -259,6 +270,26 @@ def find_end_candidates(hits: List[OCRHit], threshold: int = 2) -> List[Tuple[fl
     return out
 
 
+def find_timer_start_candidates(hits: List[OCRHit], low: int = 17 * 60 + 28, high: int = 17 * 60 + 30) -> List[Tuple[float, str]]:
+    """Game start: timer reads 17:28–17:30."""
+    out: List[Tuple[float, str]] = []
+    for h in hits:
+        s = parse_timer_seconds(h.raw_text)
+        if s is not None and low <= s <= high:
+            out.append((h.t, h.raw_text))
+    return out
+
+
+def find_timer_end_candidates(hits: List[OCRHit], threshold: int = 2) -> List[Tuple[float, str]]:
+    """Game end: timer hits 00:00–00:02."""
+    out: List[Tuple[float, str]] = []
+    for h in hits:
+        s = parse_timer_seconds(h.raw_text)
+        if s is not None and s <= threshold:
+            out.append((h.t, h.raw_text))
+    return out
+
+
 def cluster_candidates(candidates: List[Tuple[float, str]], cluster_gap_seconds: float) -> List[Tuple[float, str]]:
     if not candidates:
         return []
@@ -392,13 +423,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--input", required=True, help="Path to vod.mp4")
     p.add_argument("--output-dir", required=True, help="Directory for clips and reports")
     p.add_argument("--sample-seconds", type=float, default=0.25)
-    p.add_argument("--chat-left", type=float, default=0.054)
-    p.add_argument("--chat-top", type=float, default=0.262)
-    p.add_argument("--chat-right", type=float, default=0.270)
-    p.add_argument("--chat-bottom", type=float, default=0.636)
+    p.add_argument("--timer-left", type=float, default=0.88, help="Timer crop: left edge as fraction of frame width")
+    p.add_argument("--timer-top", type=float, default=0.005, help="Timer crop: top edge as fraction of frame height")
+    p.add_argument("--timer-right", type=float, default=0.99, help="Timer crop: right edge as fraction of frame width")
+    p.add_argument("--timer-bottom", type=float, default=0.055, help="Timer crop: bottom edge as fraction of frame height")
+    p.add_argument("--timer-start-low", type=int, default=17 * 60 + 28, help="Game start: timer lower bound in seconds (default 17:28=1048)")
+    p.add_argument("--timer-start-high", type=int, default=17 * 60 + 30, help="Game start: timer upper bound in seconds (default 17:30=1050)")
+    p.add_argument("--timer-end-threshold", type=int, default=2, help="Game end: timer at or below this many seconds (default 2)")
     p.add_argument("--start-cluster-gap-seconds", type=float, default=30.0)
     p.add_argument("--end-cluster-gap-seconds", type=float, default=10.0)
-    p.add_argument("--start-pad-seconds", type=float, default=6.0)
+    p.add_argument("--start-pad-seconds", type=float, default=3.0)
     p.add_argument("--end-pad-seconds", type=float, default=2.0)
     p.add_argument("--min-duration-seconds", type=float, default=120.0)
     p.add_argument("--max-duration-seconds", type=float, default=7200.0)
@@ -419,14 +453,14 @@ def main() -> int:
         return 1
     os.makedirs(args.output_dir, exist_ok=True)
 
-    chat_box = (args.chat_left, args.chat_top, args.chat_right, args.chat_bottom)
-    print(f"[INFO] Scanning VOD chat: {args.input}")
-    hits, duration = scan_video_for_chat(args.input, args.sample_seconds, chat_box, args.tesseract_cmd, args.max_workers)
+    timer_box = (args.timer_left, args.timer_top, args.timer_right, args.timer_bottom)
+    print(f"[INFO] Scanning VOD timer: {args.input}")
+    hits, duration = scan_video_for_chat(args.input, args.sample_seconds, timer_box, args.tesseract_cmd, args.max_workers)
     print(f"[INFO] Video duration: {sec_to_hms(duration)}")
     print(f"[INFO] OCR samples: {len(hits)}")
 
-    start_candidates = find_start_candidates(hits)
-    end_candidates = find_end_candidates(hits)
+    start_candidates = find_timer_start_candidates(hits, low=args.timer_start_low, high=args.timer_start_high)
+    end_candidates = find_timer_end_candidates(hits, threshold=args.timer_end_threshold)
     start_clusters = cluster_candidates(start_candidates, args.start_cluster_gap_seconds)
     end_clusters = cluster_candidates(end_candidates, args.end_cluster_gap_seconds)
 
