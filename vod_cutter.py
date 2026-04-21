@@ -97,6 +97,23 @@ def parse_timer_seconds(text: str) -> Optional[int]:
     return None
 
 
+_TESSERACT_FALLBACK_PATHS = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    r"C:\Users\{}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe".format(os.environ.get("USERNAME", "")),
+]
+
+def _resolve_tesseract(cmd: Optional[str]) -> Optional[str]:
+    if cmd:
+        return cmd
+    if shutil.which("tesseract"):
+        return None  # already on PATH, let pytesseract find it
+    for path in _TESSERACT_FALLBACK_PATHS:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def sec_to_hms(seconds: float) -> str:
     seconds = max(0.0, seconds)
     total_ms = int(round(seconds * 1000))
@@ -140,16 +157,15 @@ def crop_region(img: Image.Image, left: float, top: float, right: float, bottom:
     return img.crop((x1, y1, x2, y2))
 
 
+_TIMER_OCR_CFG = r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789:"
+
 def _ocr_worker(task: Tuple[int, float, bytes, Optional[str]]) -> Tuple[int, float, str, str]:
     sample_index, t, png_bytes, tesseract_cmd = task
     try:
         if tesseract_cmd:
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-        img = Image.open(BytesIO(png_bytes)).convert("RGB")
-        processed = preprocess_for_ocr(img)
-        text1 = pytesseract.image_to_string(processed, config="--oem 3 --psm 6") or ""
-        text2 = pytesseract.image_to_string(processed, config="--oem 3 --psm 11") or ""
-        raw_text = (text1 + "\n" + text2).strip()
+        img = Image.open(BytesIO(png_bytes)).convert("L")  # grayscale only
+        raw_text = (pytesseract.image_to_string(img, config=_TIMER_OCR_CFG) or "").strip()
         return sample_index, t, raw_text, normalize_text(raw_text)
     except Exception:
         return sample_index, t, "", ""
@@ -423,13 +439,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--input", required=True, help="Path to vod.mp4")
     p.add_argument("--output-dir", required=True, help="Directory for clips and reports")
     p.add_argument("--sample-seconds", type=float, default=0.25)
-    p.add_argument("--timer-left", type=float, default=0.88, help="Timer crop: left edge as fraction of frame width")
-    p.add_argument("--timer-top", type=float, default=0.005, help="Timer crop: top edge as fraction of frame height")
-    p.add_argument("--timer-right", type=float, default=0.99, help="Timer crop: right edge as fraction of frame width")
-    p.add_argument("--timer-bottom", type=float, default=0.055, help="Timer crop: bottom edge as fraction of frame height")
-    p.add_argument("--timer-start-low", type=int, default=17 * 60 + 28, help="Game start: timer lower bound in seconds (default 17:28=1048)")
-    p.add_argument("--timer-start-high", type=int, default=17 * 60 + 30, help="Game start: timer upper bound in seconds (default 17:30=1050)")
-    p.add_argument("--timer-end-threshold", type=int, default=2, help="Game end: timer at or below this many seconds (default 2)")
+    p.add_argument("--timer-left", type=float, default=0.60, help="Timer crop: left edge as fraction of frame width")
+    p.add_argument("--timer-top", type=float, default=0.0, help="Timer crop: top edge as fraction of frame height")
+    p.add_argument("--timer-right", type=float, default=0.72, help="Timer crop: right edge as fraction of frame width")
+    p.add_argument("--timer-bottom", type=float, default=0.028, help="Timer crop: bottom edge as fraction of frame height")
+    p.add_argument("--timer-start-low", type=int, default=17 * 60 + 20, help="Game start: timer lower bound in seconds (default 17:20=1040)")
+    p.add_argument("--timer-start-high", type=int, default=17 * 60 + 35, help="Game start: timer upper bound in seconds (default 17:35=1055)")
+    p.add_argument("--timer-end-threshold", type=int, default=15, help="Game end: timer at or below this many seconds (default 15)")
     p.add_argument("--start-cluster-gap-seconds", type=float, default=30.0)
     p.add_argument("--end-cluster-gap-seconds", type=float, default=10.0)
     p.add_argument("--start-pad-seconds", type=float, default=3.0)
@@ -440,6 +456,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=max(1, (os.cpu_count() or 4) - 1))
     p.add_argument("--no-cut", action="store_true")
     p.add_argument("--fast-cut", action="store_true")
+    p.add_argument("--dump-ocr", action="store_true", help="Write all raw OCR results to ocr_dump.txt for debugging")
     return p.parse_args()
 
 
@@ -453,11 +470,29 @@ def main() -> int:
         return 1
     os.makedirs(args.output_dir, exist_ok=True)
 
+    tesseract_cmd = _resolve_tesseract(args.tesseract_cmd)
+    if tesseract_cmd:
+        print(f"[INFO] Using Tesseract at: {tesseract_cmd}")
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
     timer_box = (args.timer_left, args.timer_top, args.timer_right, args.timer_bottom)
     print(f"[INFO] Scanning VOD timer: {args.input}")
-    hits, duration = scan_video_for_chat(args.input, args.sample_seconds, timer_box, args.tesseract_cmd, args.max_workers)
+    hits, duration = scan_video_for_chat(args.input, args.sample_seconds, timer_box, tesseract_cmd, args.max_workers)
     print(f"[INFO] Video duration: {sec_to_hms(duration)}")
     print(f"[INFO] OCR samples: {len(hits)}")
+
+    non_empty = [h for h in hits if h.raw_text.strip()]
+    print(f"[INFO] Non-empty OCR results: {len(non_empty)}")
+    print("[INFO] Sample OCR outputs (first 5 non-empty):")
+    for h in non_empty[:5]:
+        print(f"  t={sec_to_hms(h.t)} | {repr(h.raw_text[:80])}")
+
+    if args.dump_ocr:
+        dump_path = os.path.join(args.output_dir, "ocr_dump.txt")
+        with open(dump_path, "w", encoding="utf-8") as f:
+            for h in hits:
+                f.write(f"{sec_to_hms(h.t)}\t{repr(h.raw_text)}\n")
+        print(f"[INFO] OCR dump written to: {dump_path}")
 
     start_candidates = find_timer_start_candidates(hits, low=args.timer_start_low, high=args.timer_start_high)
     end_candidates = find_timer_end_candidates(hits, threshold=args.timer_end_threshold)
