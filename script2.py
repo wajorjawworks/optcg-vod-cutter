@@ -83,6 +83,30 @@ def extract_room_id(text: str) -> Optional[str]:
     return m.group(1).upper() if m else None
 
 
+# ── leader extraction ────────────────────────────────────────────────────────
+
+_LEADER_RE = re.compile(r'Leader is ([^[<\n]+?) \[', re.IGNORECASE)
+
+
+def extract_leaders(log_path: str) -> List[str]:
+    """Return leader names in the order they appear in the log (opponent first, then you)."""
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="ignore")
+        return [m.group(1).strip() for m in _LEADER_RE.finditer(text)]
+    except Exception:
+        return []
+
+
+def leaders_to_slug(leaders: List[str]) -> str:
+    """Turn ['Monkey D. Luffy', 'Imu'] into 'MonkeyDLuffy_vs_Imu'."""
+    def sanitize(name: str) -> str:
+        name = re.sub(r"[^a-zA-Z0-9 ]", "", name)  # keep letters, digits, spaces
+        return "".join(word.capitalize() for word in name.split())
+
+    parts = [sanitize(l) for l in leaders if l]
+    return "_vs_".join(parts) if parts else "Unknown"
+
+
 # ── log file index ───────────────────────────────────────────────────────────
 
 def build_log_index(log_dir: str) -> Dict[str, List[Path]]:
@@ -218,12 +242,31 @@ def main() -> int:
                 print(f"    {m.name}")
 
         best = matches[0]  # earliest by filename (ISO timestamp sorts correctly)
-        dest = os.path.join(args.output_dir, f"game_{idx:02d}.log")
-        shutil.copy2(str(best), dest)
-        print(f"  Matched: {best.name} -> {dest}")
 
-        seg["log_file"] = dest
+        # Extract leaders and build a descriptive slug for renaming
+        leaders = extract_leaders(str(best))
+        slug = leaders_to_slug(leaders)
+        print(f"  Leaders: {' vs '.join(leaders) if leaders else 'unknown'}")
+
+        # Rename the clip
+        old_clip = os.path.join(args.output_dir, f"game_{idx:02d}.mp4")
+        new_clip = os.path.join(args.output_dir, f"game_{idx:02d}_{slug}.mp4")
+        if os.path.isfile(old_clip):
+            os.rename(old_clip, new_clip)
+            print(f"  Renamed clip: game_{idx:02d}.mp4 -> {os.path.basename(new_clip)}")
+        else:
+            print(f"  [WARN] Clip not found: {old_clip}")
+            new_clip = old_clip
+
+        # Copy the log with matching name
+        dest_log = os.path.join(args.output_dir, f"game_{idx:02d}_{slug}.log")
+        shutil.copy2(str(best), dest_log)
+        print(f"  Matched log: {best.name} -> {os.path.basename(dest_log)}")
+
+        seg["log_file"] = dest_log
         seg["log_files_all"] = [str(p) for p in matches]
+        seg["leaders"] = leaders
+        seg["clip_file"] = new_clip
 
     out_json = os.path.join(args.output_dir, "segments_matched.json")
     with open(out_json, "w", encoding="utf-8") as f:
