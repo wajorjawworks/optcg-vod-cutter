@@ -420,9 +420,13 @@ def write_segments_csv(output_dir: str, segments: List[Segment]) -> str:
 
 
 def cut_clips(
-    video_path: str, output_dir: str, segments: List[Segment], fast_cut: bool
+    video_path: str, output_dir: str, segments: List[Segment],
+    fast_cut: bool, skip_cut_seconds: float = 90.0,
 ) -> None:
     for seg in segments:
+        if seg.duration < skip_cut_seconds:
+            print(f"  Skipped cut for game {seg.index} ({seg.duration:.0f}s — too short)")
+            continue
         out_path = os.path.join(output_dir, f"game_{seg.index:02d}.mp4")
         if fast_cut:
             cmd = ["ffmpeg", "-y", "-ss", f"{seg.start:.3f}", "-to", f"{seg.end:.3f}",
@@ -958,8 +962,10 @@ def parse_args() -> argparse.Namespace:
                    default=max(1, (os.cpu_count() or 4) - 1))
 
     # Stage skips
-    p.add_argument("--no-cut",        action="store_true", help="Detect only, don't run ffmpeg")
-    p.add_argument("--fast-cut",      action="store_true", help="Stream copy (faster, less precise)")
+    p.add_argument("--no-cut",             action="store_true", help="Detect only, don't run ffmpeg")
+    p.add_argument("--fast-cut",           action="store_true", help="Stream copy (faster, less precise)")
+    p.add_argument("--skip-cut-seconds",   type=float, default=90.0,
+                   help="Skip cutting clips shorter than this many seconds (default 90)")
     p.add_argument("--no-match",      action="store_true", help="Skip log matching")
     p.add_argument("--no-thumbnails", action="store_true", help="Skip thumbnail generation")
     p.add_argument("--dump-ocr",      action="store_true", help="Write raw OCR to ocr_dump.txt")
@@ -1054,7 +1060,7 @@ def main() -> int:
     seg_dicts = [asdict(s) for s in segments]
 
     if not args.no_cut:
-        cut_clips(args.input, args.output_dir, segments, args.fast_cut)
+        cut_clips(args.input, args.output_dir, segments, args.fast_cut, args.skip_cut_seconds)
 
     # ── stage 2: log matching ─────────────────────────────────────────────────
     if not args.no_match:
