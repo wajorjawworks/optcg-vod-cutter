@@ -248,12 +248,22 @@ def find_timer_end_candidates(
             if (s := parse_timer_seconds(h.raw_text)) is not None and s <= threshold]
 
 
-def find_chat_end_candidates(hits: List[OCRHit]) -> List[Tuple[float, str]]:
-    """Detect game endings from chat keywords: concedes, opponent has disconnected."""
+def find_chat_end_candidates(hits: List[OCRHit], score_threshold: int = 3) -> List[Tuple[float, str]]:
+    """
+    Detect game endings from chat keywords using a score threshold.
+    'concedes' scores 3 (triggers alone), 'opponent has disconnected' scores 1
+    (requires other signals to reach threshold), preventing mid-game brief
+    disconnections from being treated as game ends.
+    """
     out = []
     for h in hits:
         norm = h.norm_text
-        if any(kw in norm for kw in END_KEYWORDS):
+        score = 0
+        if "concedes" in norm:
+            score += 3
+        if "opponent has disconnected" in norm:
+            score += 1
+        if score >= score_threshold:
             out.append((h.t, h.raw_text))
     return out
 
@@ -977,7 +987,8 @@ def main() -> int:
     end_cands       = sorted(timer_end_cands + chat_end_cands, key=lambda x: x[0])
 
     start_clusters = cluster_candidates(start_cands, args.start_cluster_gap_seconds)
-    end_clusters   = cluster_candidates(end_cands,   args.end_cluster_gap_seconds)
+    # Use a larger gap for combined ends — chat concede messages flood several seconds
+    end_clusters   = cluster_candidates(end_cands, max(args.end_cluster_gap_seconds, 30.0))
 
     if chat_end_cands:
         print(f"[INFO] Chat end events detected: {len(chat_end_cands)}")
