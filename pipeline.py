@@ -136,15 +136,18 @@ def parse_timer_seconds(text: str) -> Optional[int]:
 
 
 _TIMER_OCR_CFG = r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789:"
+_CHAT_OCR_CFG  = r"--oem 3 --psm 6"
+
+END_KEYWORDS = ["concedes", "opponent has disconnected"]
 
 
-def _ocr_worker(task: Tuple[int, float, bytes, Optional[str]]) -> Tuple[int, float, str, str]:
-    sample_index, t, png_bytes, tesseract_cmd = task
+def _ocr_worker(task: Tuple[int, float, bytes, Optional[str], str]) -> Tuple[int, float, str, str]:
+    sample_index, t, png_bytes, tesseract_cmd, ocr_cfg = task
     try:
         if tesseract_cmd:
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
         img = Image.open(BytesIO(png_bytes)).convert("L")
-        raw_text = (pytesseract.image_to_string(img, config=_TIMER_OCR_CFG) or "").strip()
+        raw_text = (pytesseract.image_to_string(img, config=ocr_cfg) or "").strip()
         return sample_index, t, raw_text, normalize_text(raw_text)
     except Exception:
         return sample_index, t, "", ""
@@ -154,44 +157,81 @@ def scan_video_for_timer(
     video_path: str,
     sample_seconds: float,
     timer_box: Tuple[float, float, float, float],
+    chat_box: Tuple[float, float, float, float],
     tesseract_cmd: Optional[str],
     max_workers: int,
-) -> Tuple[List[OCRHit], float]:
+    chat_sample_seconds: float = 2.0,
+) -> Tuple[List[OCRHit], List[OCRHit], float]:
+    """
+    Single video decode pass: samples timer region at sample_seconds,
+    and chat region at chat_sample_seconds for end keyword detection.
+    Returns (timer_hits, chat_hits, duration).
+    """
     container = av.open(video_path)
     stream = next(s for s in container.streams if s.type == "video")
     duration = float(container.duration / av.time_base) if container.duration is not None else 0.0
 
-    tasks: List[Tuple[int, float, bytes, Optional[str]]] = []
-    next_sample_t = 0.0
-    sample_index = 0
+    timer_tasks: List = []
+    chat_tasks: List = []
+    next_timer_t = 0.0
+    next_chat_t = 0.0
+    timer_idx = 0
+    chat_idx = 0
+
     for frame in container.decode(video=stream.index):
         if frame.pts is None or frame.time_base is None:
             continue
         t = float(frame.pts * frame.time_base)
-        if t + 1e-6 < next_sample_t:
+        need_timer = t + 1e-6 >= next_timer_t
+        need_chat  = t + 1e-6 >= next_chat_t
+        if not need_timer and not need_chat:
             continue
-        buf = BytesIO()
-        crop_region(frame.to_image(), *timer_box).save(buf, format="PNG")
-        tasks.append((sample_index, t, buf.getvalue(), tesseract_cmd))
-        next_sample_t += sample_seconds
-        sample_index += 1
+
+        img = frame.to_image()
+
+        if need_timer:
+            buf = BytesIO()
+            crop_region(img, *timer_box).save(buf, format="PNG")
+            timer_tasks.append((timer_idx, t, buf.getvalue(), tesseract_cmd, _TIMER_OCR_CFG))
+            next_timer_t += sample_seconds
+            timer_idx += 1
+
+        if need_chat:
+            buf = BytesIO()
+            crop_region(img, *chat_box).convert("L").save(buf, format="PNG")
+            chat_tasks.append((chat_idx, t, buf.getvalue(), tesseract_cmd, _CHAT_OCR_CFG))
+            next_chat_t += chat_sample_seconds
+            chat_idx += 1
     container.close()
 
-    results: Dict[int, Tuple[int, float, str, str]] = {}
-    with ProcessPoolExecutor(max_workers=max(1, max_workers)) as executor:
-        future_map = {executor.submit(_ocr_worker, task): task[0] for task in tasks}
-        for future in as_completed(future_map):
-            idx = future_map[future]
-            try:
-                results[idx] = future.result()
-            except Exception:
-                results[idx] = (idx, 0.0, "", "")
+    all_tasks = timer_tasks + chat_tasks
 
-    hits: List[OCRHit] = []
-    for idx in sorted(results.keys()):
-        _, t, raw_text, norm_text = results[idx]
-        hits.append(OCRHit(t=t, raw_text=raw_text, norm_text=norm_text))
-    return hits, duration
+    def run_ocr(tasks):
+        res: Dict[int, Tuple] = {}
+        with ProcessPoolExecutor(max_workers=max(1, max_workers)) as executor:
+            fmap = {executor.submit(_ocr_worker, task): task[0] for task in tasks}
+            for future in as_completed(fmap):
+                idx = fmap[future]
+                try:
+                    res[idx] = future.result()
+                except Exception:
+                    res[idx] = (idx, 0.0, "", "")
+        return res
+
+    timer_results = run_ocr(timer_tasks)
+    chat_results  = run_ocr(chat_tasks)
+
+    timer_hits: List[OCRHit] = []
+    for idx in sorted(timer_results):
+        _, t, raw, norm = timer_results[idx]
+        timer_hits.append(OCRHit(t=t, raw_text=raw, norm_text=norm))
+
+    chat_hits: List[OCRHit] = []
+    for idx in sorted(chat_results):
+        _, t, raw, norm = chat_results[idx]
+        chat_hits.append(OCRHit(t=t, raw_text=raw, norm_text=norm))
+
+    return timer_hits, chat_hits, duration
 
 
 def find_timer_start_candidates(
@@ -206,6 +246,16 @@ def find_timer_end_candidates(
 ) -> List[Tuple[float, str]]:
     return [(h.t, h.raw_text) for h in hits
             if (s := parse_timer_seconds(h.raw_text)) is not None and s <= threshold]
+
+
+def find_chat_end_candidates(hits: List[OCRHit]) -> List[Tuple[float, str]]:
+    """Detect game endings from chat keywords: concedes, opponent has disconnected."""
+    out = []
+    for h in hits:
+        norm = h.norm_text
+        if any(kw in norm for kw in END_KEYWORDS):
+            out.append((h.t, h.raw_text))
+    return out
 
 
 def cluster_candidates(
@@ -902,27 +952,37 @@ def main() -> int:
     print(f"[STAGE 1] Scanning timer: {args.input}")
     print(f"{'='*60}")
 
-    hits, duration = scan_video_for_timer(
-        args.input, args.sample_seconds, timer_box, tesseract_cmd, args.max_workers
+    timer_hits, chat_hits, duration = scan_video_for_timer(
+        args.input, args.sample_seconds, timer_box, chat_box, tesseract_cmd, args.max_workers
     )
-    print(f"[INFO] Duration: {sec_to_hms(duration)}, OCR samples: {len(hits)}")
+    print(f"[INFO] Duration: {sec_to_hms(duration)}, timer samples: {len(timer_hits)}, chat samples: {len(chat_hits)}")
 
-    non_empty = [h for h in hits if h.raw_text.strip()]
-    print(f"[INFO] Non-empty OCR: {len(non_empty)}")
+    non_empty = [h for h in timer_hits if h.raw_text.strip()]
+    print(f"[INFO] Non-empty timer OCR: {len(non_empty)}")
     for h in non_empty[:5]:
         print(f"  t={sec_to_hms(h.t)} | {repr(h.raw_text[:60])}")
 
     if args.dump_ocr:
         dump = os.path.join(args.output_dir, "ocr_dump.txt")
         with open(dump, "w", encoding="utf-8") as f:
-            for h in hits:
-                f.write(f"{sec_to_hms(h.t)}\t{repr(h.raw_text)}\n")
+            for h in timer_hits:
+                f.write(f"{sec_to_hms(h.t)}\ttimer\t{repr(h.raw_text)}\n")
+            for h in chat_hits:
+                f.write(f"{sec_to_hms(h.t)}\tchat\t{repr(h.raw_text)}\n")
         print(f"[INFO] OCR dump: {dump}")
 
-    start_cands = find_timer_start_candidates(hits, args.timer_start_low, args.timer_start_high)
-    end_cands   = find_timer_end_candidates(hits, args.timer_end_threshold)
+    start_cands     = find_timer_start_candidates(timer_hits, args.timer_start_low, args.timer_start_high)
+    timer_end_cands = find_timer_end_candidates(timer_hits, args.timer_end_threshold)
+    chat_end_cands  = find_chat_end_candidates(chat_hits)
+    end_cands       = sorted(timer_end_cands + chat_end_cands, key=lambda x: x[0])
+
     start_clusters = cluster_candidates(start_cands, args.start_cluster_gap_seconds)
     end_clusters   = cluster_candidates(end_cands,   args.end_cluster_gap_seconds)
+
+    if chat_end_cands:
+        print(f"[INFO] Chat end events detected: {len(chat_end_cands)}")
+        for t, txt in chat_end_cands[:5]:
+            print(f"  {sec_to_hms(t)} | {txt.replace(chr(10), ' ')[:80]}")
 
     print(f"[INFO] Start clusters before chat validation: {len(start_clusters)}")
 
