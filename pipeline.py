@@ -385,6 +385,10 @@ def build_segments(
                 chosen_end_text = "video end fallback"
 
         start = max(0.0, start_t - start_pad)
+        # If the pre-pad would land at or before the previous clip's end,
+        # the buffer zone is still the previous game — start at the timer tick instead
+        if segments and start <= segments[-1].end:
+            start = start_t
         end = min(duration, chosen_end_t + end_pad)
         # Never let a clip overlap the start of the next game
         if next_start_t is not None:
