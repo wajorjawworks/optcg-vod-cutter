@@ -376,19 +376,19 @@ def build_segments(
                     break
                 scan_idx += 1
 
-        apply_end_pad = True
         if chosen_end_t is None:
             if next_start_t is not None:
-                # End exactly where the next clip starts — no end_pad, no overlap
-                chosen_end_t = next_start_t - start_pad
+                chosen_end_t = next_start_t - next_start_buffer
                 chosen_end_text = "next start fallback"
-                apply_end_pad = False
             else:
                 chosen_end_t = duration
                 chosen_end_text = "video end fallback"
 
         start = max(0.0, start_t - start_pad)
-        end = min(duration, chosen_end_t + (end_pad if apply_end_pad else 0.0))
+        end = min(duration, chosen_end_t + end_pad)
+        # Never let a clip overlap the start of the next game
+        if next_start_t is not None:
+            end = min(end, next_start_t - start_pad)
         dur = end - start
 
         if dur < min_duration or dur > max_duration:
@@ -949,7 +949,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end-cluster-gap-seconds",   type=float, default=10.0)
     p.add_argument("--start-pad-seconds",       type=float, default=3.0)
     p.add_argument("--end-pad-seconds",         type=float, default=4.0)
-    p.add_argument("--min-duration-seconds",    type=float, default=120.0)
+    p.add_argument("--min-duration-seconds",    type=float, default=20.0)
     p.add_argument("--max-duration-seconds",    type=float, default=7200.0)
 
     # System
