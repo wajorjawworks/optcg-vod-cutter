@@ -39,6 +39,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import difflib
+
 import av
 import numpy as np
 import pytesseract
@@ -375,6 +377,32 @@ def leaders_to_slug(leaders: List[str]) -> str:
     return "_vs_".join(parts) if parts else "Unknown"
 
 
+def _levenshtein(a: str, b: str) -> int:
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (ca != cb)))
+        prev = curr
+    return prev[-1]
+
+
+def fuzzy_lookup_room_id(
+    room_id: str, log_index: Dict[str, List[Path]], max_distance: int = 2
+) -> Optional[Tuple[str, List[Path]]]:
+    """Return the best-matching index entry within max_distance edits, or None."""
+    best_id, best_matches, best_dist = None, None, max_distance + 1
+    for key, matches in log_index.items():
+        if len(key) != len(room_id):
+            continue
+        d = _levenshtein(room_id, key)
+        if d < best_dist:
+            best_dist, best_id, best_matches = d, key, matches
+    return (best_id, best_matches) if best_id is not None else None
+
+
 def build_log_index(log_dir: str) -> Dict[str, List[Path]]:
     index: Dict[str, List[Path]] = {}
     for log_path in sorted(Path(log_dir).glob("*.log")):
@@ -388,6 +416,16 @@ def build_log_index(log_dir: str) -> Dict[str, List[Path]]:
     return index
 
 
+def _preprocess_chat_for_ocr(img: Image.Image) -> Image.Image:
+    """Upscale and binarize for better small-text OCR."""
+    img = ImageOps.grayscale(img)
+    img = ImageOps.autocontrast(img)
+    img = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+    arr = np.array(img)
+    cutoff = max(100, int(np.percentile(arr, 60)))
+    return Image.fromarray(np.where(arr > cutoff, 255, 0).astype(np.uint8), mode="L")
+
+
 def scan_chat_for_room_id(
     video_path: str,
     start_t: float,
@@ -395,12 +433,19 @@ def scan_chat_for_room_id(
     tesseract_cmd: Optional[str],
     window: float = 60.0,
     sample_seconds: float = 2.0,
-) -> Optional[str]:
+    next_start_t: Optional[float] = None,
+) -> Dict[str, int]:
+    """
+    Scan the chat panel for room ID candidates, returning a vote dict {room_id: count}.
+    Caller picks the best candidate. Window is capped before the next game start.
+    """
+    votes: Dict[str, int] = {}
     try:
         container = av.open(video_path)
         stream = next(s for s in container.streams if s.type == "video")
         check_from = max(0.0, start_t - 10.0)
-        check_to = start_t + window
+        # Never scan past the next game's start to avoid picking up the wrong room ID
+        check_to = min(start_t + window, next_start_t - 5.0) if next_start_t else start_t + window
         next_t = check_from
         for frame in container.decode(video=stream.index):
             if frame.pts is None or frame.time_base is None:
@@ -412,17 +457,25 @@ def scan_chat_for_room_id(
                 break
             if t < next_t:
                 continue
-            chat_img = crop_region(frame.to_image(), *chat_box).convert("L")
-            raw = pytesseract.image_to_string(chat_img, config="--oem 3 --psm 6") or ""
-            room_id = extract_room_id(raw)
-            if room_id:
-                container.close()
-                return room_id
+
+            chat_img = crop_region(frame.to_image(), *chat_box)
+
+            # Try raw grayscale first, then preprocessed — take any room ID found
+            for processed in (chat_img.convert("L"), _preprocess_chat_for_ocr(chat_img)):
+                raw = pytesseract.image_to_string(processed, config="--oem 3 --psm 6") or ""
+                room_id = extract_room_id(raw)
+                if room_id:
+                    votes[room_id] = votes.get(room_id, 0) + 1
+                    break
+
             next_t = t + sample_seconds
         container.close()
     except Exception as e:
         print(f"  [WARN] chat scan error: {e}")
-    return None
+
+    if len(votes) > 1:
+        print(f"  [INFO] Room ID votes: {dict(sorted(votes.items(), key=lambda x: -x[1]))}")
+    return votes
 
 
 def match_logs(
@@ -437,26 +490,47 @@ def match_logs(
     print(f"[INFO] Indexed {len(log_index)} unique room IDs across "
           f"{sum(len(v) for v in log_index.values())} log files")
 
-    for seg in segments:
+    for i, seg in enumerate(segments):
         idx = seg["index"]
         start_t = seg["start"]
+        next_start_t = segments[i + 1]["start"] if i + 1 < len(segments) else None
         print(f"\n[Game {idx}] start={start_t:.1f}s — scanning chat for room ID...")
 
-        room_id = scan_chat_for_room_id(video_path, start_t, chat_box, tesseract_cmd)
+        votes = scan_chat_for_room_id(video_path, start_t, chat_box, tesseract_cmd,
+                                       next_start_t=next_start_t)
 
-        if not room_id:
+        if not votes:
             print(f"  [WARN] No room ID found — cannot match log")
             seg.update(room_id=None, log_file=None, log_files_all=[], leaders=[], clip_file=seg.get("clip_file"))
             continue
 
+        # Prefer any candidate that directly hits the log index (sorted by vote count)
+        room_id = None
+        matches = []
+        for candidate in sorted(votes, key=lambda k: -votes[k]):
+            if candidate in log_index:
+                room_id = candidate
+                matches = log_index[candidate]
+                break
+
+        # Fall back: fuzzy match each candidate, keep best
+        if not room_id:
+            for candidate in sorted(votes, key=lambda k: -votes[k]):
+                fuzzy = fuzzy_lookup_room_id(candidate, log_index)
+                if fuzzy:
+                    matched_id, matches = fuzzy
+                    room_id = matched_id
+                    print(f"  [FUZZY] OCR '{candidate}' -> matched log room ID '{matched_id}'")
+                    break
+
+        if not room_id:
+            top = max(votes, key=lambda k: votes[k])
+            print(f"  [WARN] No log match for any candidate (top OCR read: '{top}')")
+            seg.update(room_id=top, log_file=None, log_files_all=[])
+            continue
+
         print(f"  Room ID: {room_id}")
         seg["room_id"] = room_id
-
-        matches = log_index.get(room_id, [])
-        if not matches:
-            print(f"  [WARN] No log file found for room ID {room_id}")
-            seg.update(log_file=None, log_files_all=[])
-            continue
 
         if len(matches) > 1:
             print(f"  [INFO] {len(matches)} log files share this room ID — using earliest")
