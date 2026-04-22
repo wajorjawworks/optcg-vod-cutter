@@ -630,9 +630,11 @@ def match_logs(
     # Only consider logs from the same date as already-matched logs to avoid cross-session bleed
     unmatched_segs = [s for s in segments if not s.get("log_file")]
     used_logs = {s["log_file"] for s in segments if s.get("log_file")}
+    # Derive dates from the original source log paths (log_files_all), not the renamed dest paths
     matched_dates = {
-        os.path.basename(lf)[:10]  # "2026-04-21"
-        for lf in used_logs if lf
+        os.path.basename(src)[:10]  # "2026-04-21"
+        for s in segments if s.get("log_files_all")
+        for src in s["log_files_all"]
     }
     all_logs = sorted(Path(log_dir).glob("*.log"))
     unmatched_logs = [
