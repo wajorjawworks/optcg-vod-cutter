@@ -368,9 +368,11 @@ def build_segments(
                     break
                 else:
                     break
-            # For the last game: only accept a chat-based end (concede/disconnect)
+            # For the last game: only accept a chat-based end that's meaningfully
+            # after the game starts (concede messages from the previous game can
+            # bleed into this game's window via use_last cluster expansion)
             else:
-                if is_chat_end:
+                if is_chat_end and end_t > start_t + min_duration:
                     chosen_end_t, chosen_end_text = end_t, end_text
                     end_idx = scan_idx + 1
                     break
