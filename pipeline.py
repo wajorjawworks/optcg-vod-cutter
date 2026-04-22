@@ -629,17 +629,17 @@ def match_logs(
     # Chronological fallback: assign unmatched log files (by timestamp) to unmatched games
     # Only consider logs from the same date as already-matched logs to avoid cross-session bleed
     unmatched_segs = [s for s in segments if not s.get("log_file")]
-    used_logs = {s["log_file"] for s in segments if s.get("log_file")}
-    # Derive dates from the original source log paths (log_files_all), not the renamed dest paths
-    matched_dates = {
-        os.path.basename(src)[:10]  # "2026-04-21"
+    # Track original source paths (from log_files_all) as already-used
+    used_source_logs = {
+        src
         for s in segments if s.get("log_files_all")
         for src in s["log_files_all"]
     }
+    matched_dates = {os.path.basename(src)[:10] for src in used_source_logs}
     all_logs = sorted(Path(log_dir).glob("*.log"))
     unmatched_logs = [
         p for p in all_logs
-        if str(p) not in used_logs
+        if str(p) not in used_source_logs
         and (not matched_dates or p.name[:10] in matched_dates)
         and extract_room_id(p.read_text(encoding="utf-8", errors="ignore").split("\n")[0])
     ]
