@@ -269,7 +269,7 @@ def find_chat_end_candidates(hits: List[OCRHit], score_threshold: int = 3) -> Li
 
 
 def cluster_candidates(
-    candidates: List[Tuple[float, str]], cluster_gap: float
+    candidates: List[Tuple[float, str]], cluster_gap: float, use_last: bool = False
 ) -> List[Tuple[float, str]]:
     if not candidates:
         return []
@@ -280,7 +280,7 @@ def cluster_candidates(
             clusters[-1].append(item)
         else:
             clusters.append([item])
-    return [(c[0][0], c[0][1]) for c in clusters]
+    return [(c[-1][0], c[-1][1]) if use_last else (c[0][0], c[0][1]) for c in clusters]
 
 
 def validate_start_with_chat(
@@ -1023,8 +1023,9 @@ def main() -> int:
     end_cands       = sorted(timer_end_cands + chat_end_cands, key=lambda x: x[0])
 
     start_clusters = cluster_candidates(start_cands, args.start_cluster_gap_seconds)
-    # Use a larger gap for combined ends — chat concede messages flood several seconds
-    end_clusters   = cluster_candidates(end_cands, max(args.end_cluster_gap_seconds, 30.0))
+    # Use last event in end clusters — concede/disconnect floods several messages,
+    # the last one is closest to the actual game-over moment
+    end_clusters   = cluster_candidates(end_cands, max(args.end_cluster_gap_seconds, 30.0), use_last=True)
 
     if chat_end_cands:
         print(f"[INFO] Chat end events detected: {len(chat_end_cands)}")
@@ -1044,7 +1045,7 @@ def main() -> int:
 
     print(f"[INFO] Confirmed starts: {len(start_clusters)}, end clusters: {len(end_clusters)}")
 
-    chat_end_clusters = cluster_candidates(chat_end_cands, max(args.end_cluster_gap_seconds, 30.0))
+    chat_end_clusters = cluster_candidates(chat_end_cands, max(args.end_cluster_gap_seconds, 30.0), use_last=True)
 
     segments = build_segments(
         start_clusters, end_clusters, chat_end_clusters, duration,
