@@ -566,6 +566,50 @@ def match_logs(
             clip_file=new_clip,
         )
 
+    # Chronological fallback: assign unmatched log files (by timestamp) to unmatched games
+    # Only consider logs from the same date as already-matched logs to avoid cross-session bleed
+    unmatched_segs = [s for s in segments if not s.get("log_file")]
+    used_logs = {s["log_file"] for s in segments if s.get("log_file")}
+    matched_dates = {
+        os.path.basename(lf)[:10]  # "2026-04-21"
+        for lf in used_logs if lf
+    }
+    all_logs = sorted(Path(log_dir).glob("*.log"))
+    unmatched_logs = [
+        p for p in all_logs
+        if str(p) not in used_logs
+        and (not matched_dates or p.name[:10] in matched_dates)
+        and extract_room_id(p.read_text(encoding="utf-8", errors="ignore").split("\n")[0])
+    ]
+
+    if unmatched_segs and unmatched_logs:
+        print(f"\n[INFO] Chronological fallback: {len(unmatched_segs)} unmatched game(s), "
+              f"{len(unmatched_logs)} unmatched log(s)")
+        for seg, log_path in zip(unmatched_segs, unmatched_logs):
+            idx = seg["index"]
+            leaders = extract_leaders(str(log_path))
+            slug = leaders_to_slug(leaders)
+            print(f"  [FALLBACK] Game {idx} -> {log_path.name} "
+                  f"({' vs '.join(leaders) if leaders else 'unknown'})")
+
+            new_clip = os.path.join(output_dir, f"game_{idx:02d}_{slug}.mp4")
+            exact = os.path.join(output_dir, f"game_{idx:02d}.mp4")
+            existing = sorted(Path(output_dir).glob(f"game_{idx:02d}*.mp4"))
+            if os.path.isfile(exact):
+                os.rename(exact, new_clip)
+            elif existing and str(existing[0]) != new_clip:
+                os.rename(str(existing[0]), new_clip)
+
+            dest_log = os.path.join(output_dir, f"game_{idx:02d}_{slug}.log")
+            shutil.copy2(str(log_path), dest_log)
+
+            seg.update(
+                log_file=dest_log,
+                log_files_all=[str(log_path)],
+                leaders=leaders,
+                clip_file=new_clip,
+            )
+
 
 # ── stage 3: thumbnail generation ────────────────────────────────────────────
 
@@ -614,8 +658,11 @@ def card_image_path(card_code: str, cards_dir: str) -> Optional[str]:
     m = _CARD_CODE_RE.match(card_code)
     if not m:
         return None
-    path = os.path.join(cards_dir, m.group(1), f"{card_code}.jpg")
-    return path if os.path.isfile(path) else None
+    base = os.path.join(cards_dir, m.group(1), card_code)
+    for ext in (".jpg", ".png"):
+        if os.path.isfile(base + ext):
+            return base + ext
+    return None
 
 
 def load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
@@ -811,7 +858,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start-cluster-gap-seconds", type=float, default=30.0)
     p.add_argument("--end-cluster-gap-seconds",   type=float, default=10.0)
     p.add_argument("--start-pad-seconds",       type=float, default=3.0)
-    p.add_argument("--end-pad-seconds",         type=float, default=2.0)
+    p.add_argument("--end-pad-seconds",         type=float, default=4.0)
     p.add_argument("--min-duration-seconds",    type=float, default=120.0)
     p.add_argument("--max-duration-seconds",    type=float, default=7200.0)
 
