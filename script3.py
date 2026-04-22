@@ -102,95 +102,157 @@ def load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
         return ImageFont.load_default()
 
 
-def draw_text_shadowed(draw: ImageDraw.ImageDraw, pos: Tuple[int, int], text: str,
-                       font: ImageFont.FreeTypeFont, fill, shadow=SHADOW_COLOR,
-                       offset: int = 3, anchor: str = "mm"):
-    sx, sy = pos[0] + offset, pos[1] + offset
-    draw.text((sx, sy), text, font=font, fill=shadow, anchor=anchor)
-    draw.text(pos, text, font=font, fill=fill, anchor=anchor)
+def dominant_color(img: Image.Image) -> Tuple[int, int, int]:
+    """Extract the most vivid non-dark color from an image."""
+    small = img.convert("RGB").resize((80, 80))
+    quantized = small.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
+    palette = quantized.getpalette()
+    colors = [(palette[i*3], palette[i*3+1], palette[i*3+2]) for i in range(8)]
+    def vividness(c):
+        r, g, b = c
+        brightness = (r + g + b) / 3
+        mx, mn = max(c), min(c)
+        saturation = (mx - mn) / (mx + 1)
+        return saturation * min(brightness, 180)  # vivid but not washed out
+    colors.sort(key=vividness, reverse=True)
+    return colors[0]
+
+
+def make_bg(color_l: Tuple, color_r: Tuple) -> Image.Image:
+    """Dark background with a subtle colored glow on each side."""
+    bg = Image.new("RGBA", (THUMB_W, THUMB_H), (*BG_COLOR, 255))
+
+    def add_glow(cx: int, color: Tuple, alpha: int = 90):
+        layer = Image.new("RGBA", (THUMB_W, THUMB_H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        r = 520
+        d.ellipse([cx - r, THUMB_H // 2 - r, cx + r, THUMB_H // 2 + r],
+                  fill=(*color, alpha))
+        blurred = layer.filter(ImageFilter.GaussianBlur(radius=110))
+        bg.alpha_composite(blurred)
+
+    add_glow(THUMB_W // 4, color_l)
+    add_glow(3 * THUMB_W // 4, color_r)
+
+    # Subtle dark vignette at edges
+    vignette = Image.new("RGBA", (THUMB_W, THUMB_H), (0, 0, 0, 0))
+    dv = ImageDraw.Draw(vignette)
+    for i in range(80):
+        alpha = int((i / 80) ** 2 * 160)
+        dv.rectangle([i, i, THUMB_W - i, THUMB_H - i],
+                     outline=(0, 0, 0, 160 - alpha))
+    bg.alpha_composite(vignette)
+    return bg
+
+
+def crop_art(card_img: Image.Image, art_fraction: float = 0.62) -> Image.Image:
+    """Keep only the character art, removing the text box at the bottom."""
+    h = int(card_img.height * art_fraction)
+    return card_img.crop((0, 0, card_img.width, h))
+
+
+def paste_card_with_glow(canvas: Image.Image, card_img: Image.Image,
+                          cx: int, cy: int, target_h: int, angle: float,
+                          glow_color: Tuple):
+    scale = target_h / card_img.height
+    card = card_img.resize((int(card_img.width * scale), target_h), Image.LANCZOS).convert("RGBA")
+    if angle != 0:
+        card = card.rotate(angle, expand=True, resample=Image.BICUBIC)
+
+    x = cx - card.width // 2
+    y = cy - card.height // 2
+
+    # Colored glow behind card
+    glow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    glow_mask = Image.new("RGBA", card.size, (*glow_color, 160))
+    glow_layer.paste(glow_mask, (x, y), card)
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=30))
+    canvas.alpha_composite(glow_layer)
+
+    # Drop shadow
+    shadow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    shadow_mask = Image.new("RGBA", card.size, (0, 0, 0, 200))
+    shadow_layer.paste(shadow_mask, (x + 16, y + 16), card)
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=22))
+    canvas.alpha_composite(shadow_layer)
+
+    canvas.alpha_composite(card, (x, y))
+    return x, y, card.width, card.height
 
 
 def draw_badge(draw: ImageDraw.ImageDraw, cx: int, cy: int, label: str,
                color: Tuple, font: ImageFont.FreeTypeFont):
     bbox = font.getbbox(label)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    pad_x, pad_y = 20, 10
-    rx0 = cx - tw // 2 - pad_x
-    ry0 = cy - th // 2 - pad_y
-    rx1 = cx + tw // 2 + pad_x
-    ry1 = cy + th // 2 + pad_y
-    draw.rounded_rectangle([rx0, ry0, rx1, ry1], radius=12, fill=color)
+    pad_x, pad_y = 22, 11
+    rx0, ry0 = cx - tw // 2 - pad_x, cy - th // 2 - pad_y
+    rx1, ry1 = cx + tw // 2 + pad_x, cy + th // 2 + pad_y
+    # Shadow
+    draw.rounded_rectangle([rx0+3, ry0+3, rx1+3, ry1+3], radius=14, fill=(0, 0, 0, 180))
+    draw.rounded_rectangle([rx0, ry0, rx1, ry1], radius=14, fill=color)
     draw.text((cx, cy), label, font=font, fill=(10, 10, 10), anchor="mm")
-
-
-def paste_card(canvas: Image.Image, card_img: Image.Image,
-               center_x: int, center_y: int, target_h: int, angle: float):
-    """Scale card to target_h, rotate, paste centered at (center_x, center_y)."""
-    scale = target_h / card_img.height
-    new_w = int(card_img.width * scale)
-    card = card_img.resize((new_w, target_h), Image.LANCZOS).convert("RGBA")
-
-    if angle != 0:
-        card = card.rotate(angle, expand=True, resample=Image.BICUBIC)
-
-    # Drop shadow
-    shadow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    shadow_card = Image.new("RGBA", card.size, (0, 0, 0, 180))
-    shadow_x = center_x - card.width // 2 + 12
-    shadow_y = center_y - card.height // 2 + 12
-    shadow_layer.paste(shadow_card, (shadow_x, shadow_y), card)
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=18))
-    canvas.alpha_composite(shadow_layer)
-
-    x = center_x - card.width // 2
-    y = center_y - card.height // 2
-    canvas.alpha_composite(card, (x, y))
-    return x, y, card.width, card.height
 
 
 # ── thumbnail generation ─────────────────────────────────────────────────────
 
 def create_thumbnail(leaders: list, cards_dir: str, output_path: str):
-    canvas = Image.new("RGBA", (THUMB_W, THUMB_H), (*BG_COLOR, 255))
+    font_vs    = load_font(FONT_PATH_IMPACT, 130)
+    font_badge = load_font(FONT_PATH_IMPACT, 46)
+    font_name  = load_font(FONT_PATH_IMPACT, 52)
 
-    font_vs      = load_font(FONT_PATH_IMPACT, 96)
-    font_badge   = load_font(FONT_PATH_IMPACT, 40)
-    font_name    = load_font(FONT_PATH_BOLD,   36)
+    # Load card images (art crop only)
+    card_imgs = []
+    colors = []
+    for leader in leaders[:2]:
+        path = card_image_path(leader["card_code"], cards_dir)
+        if path:
+            full = Image.open(path).convert("RGBA")
+            art = crop_art(full)
+            card_imgs.append(art)
+            colors.append(dominant_color(art))
+        else:
+            card_imgs.append(None)
+            colors.append((80, 80, 120))
 
+    # Background with per-side color glow
+    canvas = make_bg(colors[0], colors[1])
+
+    # Center divider — thin bright line
     draw = ImageDraw.Draw(canvas)
+    draw.line([(THUMB_W // 2, 0), (THUMB_W // 2, THUMB_H)], fill=(255, 255, 255, 30), width=2)
 
-    # Layout: two cards, left and right thirds; VS in center
     positions = [
-        (THUMB_W // 4,      THUMB_H // 2 - 20,  -6.0),   # left card (1st)
-        (3 * THUMB_W // 4,  THUMB_H // 2 - 20,   6.0),   # right card (2nd)
+        (THUMB_W // 4 - 10,     THUMB_H // 2 + 30, -8.0),
+        (3 * THUMB_W // 4 + 10, THUMB_H // 2 + 30,  8.0),
     ]
-    card_h = int(THUMB_H * 0.76)
+    card_h = int(THUMB_H * 0.92)
 
     for i, leader in enumerate(leaders[:2]):
         cx, cy, angle = positions[i]
-        card_path = card_image_path(leader["card_code"], cards_dir)
+        if card_imgs[i] is None:
+            continue
 
-        if card_path:
-            card_img = Image.open(card_path).convert("RGBA")
-            x, y, cw, ch = paste_card(canvas, card_img, cx, cy, card_h, angle)
-        else:
-            x, y, cw, ch = cx - 160, cy - 230, 320, 460
-            draw.rectangle([x, y, x + cw, y + ch], fill=(40, 40, 60))
+        x, y, cw, ch = paste_card_with_glow(
+            canvas, card_imgs[i], cx, cy, card_h, angle, colors[i]
+        )
 
         draw = ImageDraw.Draw(canvas)
 
-        # Badge pinned inside the top of the card, always on-screen
+        # 1ST / 2ND badge and name — fixed positions near bottom of frame
         badge_label = "1ST" if leader.get("went_first") else "2ND"
         badge_color = BADGE_FIRST if leader.get("went_first") else BADGE_SECOND
-        badge_cy = max(y + 36, 40)
+        badge_cy = THUMB_H - 100
         draw_badge(draw, cx, badge_cy, badge_label, badge_color, font_badge)
 
-        # Leader name at bottom
-        name_y = min(y + ch + 36, THUMB_H - 12)
-        draw_text_shadowed(draw, (cx, name_y), leader["name"], font_name, NAME_COLOR, anchor="mt")
+        name_cy = THUMB_H - 52
+        draw.text((cx, name_cy), leader["name"], font=font_name,
+                  fill=(255, 255, 255), anchor="mm",
+                  stroke_width=3, stroke_fill=(0, 0, 0))
 
-    # VS in center
-    draw_text_shadowed(draw, (THUMB_W // 2, THUMB_H // 2), "VS", font_vs, VS_COLOR, offset=4)
+    # VS — center, large, stroked
+    draw.text((THUMB_W // 2, THUMB_H // 2 - 20), "VS", font=font_vs,
+              fill=(255, 255, 255), anchor="mm",
+              stroke_width=6, stroke_fill=(0, 0, 0))
 
     canvas.convert("RGB").save(output_path, "JPEG", quality=95)
     print(f"  Thumbnail: {output_path}")
