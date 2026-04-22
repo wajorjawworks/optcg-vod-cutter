@@ -227,25 +227,21 @@ def create_thumbnail(leaders: list, cards_dir: str, output_path: str):
     ]
     card_h = int(THUMB_H * 0.92)
 
-    for i, leader in enumerate(leaders[:2]):
-        cx, cy, angle = positions[i]
+    # Draw cards: 2nd leader first so 1st leader renders on top and overlaps
+    for i in reversed(range(min(2, len(leaders)))):
         if card_imgs[i] is None:
             continue
+        cx, cy, angle = positions[i]
+        paste_card_with_glow(canvas, card_imgs[i], cx, cy, card_h, angle, colors[i])
 
-        x, y, cw, ch = paste_card_with_glow(
-            canvas, card_imgs[i], cx, cy, card_h, angle, colors[i]
-        )
-
-        draw = ImageDraw.Draw(canvas)
-
-        # 1ST / 2ND badge and name — fixed positions near bottom of frame
+    # Draw badges and names after all cards so text is always on top
+    draw = ImageDraw.Draw(canvas)
+    for i, leader in enumerate(leaders[:2]):
+        cx = positions[i][0]
         badge_label = "1ST" if leader.get("went_first") else "2ND"
         badge_color = BADGE_FIRST if leader.get("went_first") else BADGE_SECOND
-        badge_cy = THUMB_H - 100
-        draw_badge(draw, cx, badge_cy, badge_label, badge_color, font_badge)
-
-        name_cy = THUMB_H - 52
-        draw.text((cx, name_cy), leader["name"], font=font_name,
+        draw_badge(draw, cx, THUMB_H - 100, badge_label, badge_color, font_badge)
+        draw.text((cx, THUMB_H - 52), leader["name"], font=font_name,
                   fill=(255, 255, 255), anchor="mm",
                   stroke_width=3, stroke_fill=(0, 0, 0))
 
