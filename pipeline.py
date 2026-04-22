@@ -376,16 +376,19 @@ def build_segments(
                     break
                 scan_idx += 1
 
+        apply_end_pad = True
         if chosen_end_t is None:
             if next_start_t is not None:
-                chosen_end_t = max(start_t + min_duration, next_start_t - next_start_buffer)
+                # End exactly where the next clip starts — no end_pad, no overlap
+                chosen_end_t = next_start_t - start_pad
                 chosen_end_text = "next start fallback"
+                apply_end_pad = False
             else:
                 chosen_end_t = duration
                 chosen_end_text = "video end fallback"
 
         start = max(0.0, start_t - start_pad)
-        end = min(duration, chosen_end_t + end_pad)
+        end = min(duration, chosen_end_t + (end_pad if apply_end_pad else 0.0))
         dur = end - start
 
         if dur < min_duration or dur > max_duration:
