@@ -320,12 +320,22 @@ def validate_start_with_chat(
 def build_segments(
     start_clusters: List[Tuple[float, str]],
     end_clusters: List[Tuple[float, str]],
+    chat_end_clusters: List[Tuple[float, str]],
     duration: float,
     start_pad: float,
     end_pad: float,
     min_duration: float,
     max_duration: float,
 ) -> List[Segment]:
+    """
+    chat_end_clusters are strong signals (concede/disconnect).
+    end_clusters are combined (timer + chat).
+    For the last game (no next start), timer-only ends are not trusted
+    since the game can continue past timer expiry — fall back to a chat
+    end or video end instead.
+    """
+    chat_end_set = {t for t, _ in chat_end_clusters}
+
     segments: List[Segment] = []
     overlap_tolerance = 3.0
     next_start_buffer = 2.0
@@ -333,20 +343,38 @@ def build_segments(
 
     for i, (start_t, start_text) in enumerate(start_clusters):
         next_start_t = start_clusters[i + 1][0] if i + 1 < len(start_clusters) else None
+        is_last = next_start_t is None
         chosen_end_t: Optional[float] = None
         chosen_end_text = ""
 
         while end_idx < len(end_clusters) and end_clusters[end_idx][0] <= start_t:
             end_idx += 1
 
-        if end_idx < len(end_clusters):
-            end_t, end_text = end_clusters[end_idx]
-            if next_start_t is None or end_t < next_start_t:
-                chosen_end_t, chosen_end_text = end_t, end_text
-                end_idx += 1
-            elif end_t <= next_start_t + overlap_tolerance:
-                chosen_end_t, chosen_end_text = end_t, end_text
-                end_idx += 1
+        # Scan ahead for a valid end; for the last game skip timer-only ends
+        scan_idx = end_idx
+        while scan_idx < len(end_clusters):
+            end_t, end_text = end_clusters[scan_idx]
+            is_chat_end = end_t in chat_end_set
+
+            # For non-last games: accept the first end before (or just after) next start
+            if not is_last:
+                if next_start_t is None or end_t < next_start_t:
+                    chosen_end_t, chosen_end_text = end_t, end_text
+                    end_idx = scan_idx + 1
+                    break
+                elif end_t <= next_start_t + overlap_tolerance:
+                    chosen_end_t, chosen_end_text = end_t, end_text
+                    end_idx = scan_idx + 1
+                    break
+                else:
+                    break
+            # For the last game: only accept a chat-based end (concede/disconnect)
+            else:
+                if is_chat_end:
+                    chosen_end_t, chosen_end_text = end_t, end_text
+                    end_idx = scan_idx + 1
+                    break
+                scan_idx += 1
 
         if chosen_end_t is None:
             if next_start_t is not None:
@@ -826,9 +854,6 @@ def create_thumbnail(leaders: List[dict], cards_dir: str, output_path: str) -> N
             colors.append((80, 80, 120))
 
     canvas = make_bg(colors[0], colors[1])
-    ImageDraw.Draw(canvas).line(
-        [(THUMB_W // 2, 0), (THUMB_W // 2, THUMB_H)], fill=(255, 255, 255, 30), width=2
-    )
 
     positions = [
         (THUMB_W // 4 - 10,      THUMB_H // 2 + 30, -8.0),
@@ -1010,8 +1035,10 @@ def main() -> int:
 
     print(f"[INFO] Confirmed starts: {len(start_clusters)}, end clusters: {len(end_clusters)}")
 
+    chat_end_clusters = cluster_candidates(chat_end_cands, max(args.end_cluster_gap_seconds, 30.0))
+
     segments = build_segments(
-        start_clusters, end_clusters, duration,
+        start_clusters, end_clusters, chat_end_clusters, duration,
         args.start_pad_seconds, args.end_pad_seconds,
         args.min_duration_seconds, args.max_duration_seconds,
     )
