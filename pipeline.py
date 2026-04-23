@@ -1024,9 +1024,11 @@ def main() -> int:
         print(f"[INFO] OCR dump: {dump}")
 
     start_cands     = find_timer_start_candidates(timer_hits, args.timer_start_low, args.timer_start_high)
-    timer_end_cands = find_timer_end_candidates(timer_hits, args.timer_end_threshold)
     chat_end_cands  = find_chat_end_candidates(chat_hits)
-    end_cands       = sorted(timer_end_cands + chat_end_cands, key=lambda x: x[0])
+    # Timer-based end detection is disabled: OPTCG Sim continues into overtime after
+    # the main timer hits 0, so a near-zero timer reading does not mean the game is over.
+    # Rely on chat-based ends (concede/disconnect) and next-start/video-end fallbacks.
+    end_cands       = sorted(chat_end_cands, key=lambda x: x[0])
 
     start_clusters = cluster_candidates(start_cands, args.start_cluster_gap_seconds)
     # Use last event in end clusters — concede/disconnect floods several messages,
