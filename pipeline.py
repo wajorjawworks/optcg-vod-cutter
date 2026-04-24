@@ -356,8 +356,13 @@ def build_segments(
             end_t, end_text = end_clusters[scan_idx]
             is_chat_end = end_t in chat_end_set
 
-            # For non-last games: accept the first end before (or just after) next start
+            # For non-last games: accept the first end before (or just after) next start.
+            # Skip clusters too close to game start — they're bleed from the previous
+            # game's concede flood expanding via use_last into this game's window.
             if not is_last:
+                if end_t <= start_t + min_duration:
+                    scan_idx += 1
+                    continue
                 if next_start_t is None or end_t < next_start_t:
                     chosen_end_t, chosen_end_text = end_t, end_text
                     end_idx = scan_idx + 1
