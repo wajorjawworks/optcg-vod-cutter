@@ -26,8 +26,10 @@ Requirements:
 from __future__ import annotations
 
 import argparse
+import colorsys
 import csv
 import json
+import math
 import os
 import re
 import shutil
@@ -924,6 +926,237 @@ def generate_thumbnails(segments: List[dict], cards_dir: str, output_dir: str) -
         create_thumbnail(leaders, cards_dir, os.path.join(output_dir, f"{base}_thumb.jpg"))
 
 
+# ── decklist intro ───────────────────────────────────────────────────────────
+
+def parse_decklist(path: str) -> List[Tuple[int, str]]:
+    entries = []
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            m = re.match(r'(\d+)x([A-Z0-9]+-\d+)', line.strip(), re.IGNORECASE)
+            if m:
+                entries.append((int(m.group(1)), m.group(2).upper()))
+    return entries
+
+
+def _top_vivid_colors(img: Image.Image, n: int = 2) -> List[Tuple[int, int, int]]:
+    small = img.convert("RGB").resize((80, 80))
+    q = small.quantize(colors=16, method=Image.Quantize.MEDIANCUT)
+    palette = q.getpalette()
+    colors = [(palette[i * 3], palette[i * 3 + 1], palette[i * 3 + 2]) for i in range(16)]
+    def vividness(c):
+        r, g, b = c
+        mx, mn = max(c), min(c)
+        return ((mx - mn) / (mx + 1)) * min((r + g + b) / 3, 180)
+    return sorted(colors, key=vividness, reverse=True)[:n]
+
+
+def _rgb_to_optcg_color(r: int, g: int, b: int) -> str:
+    h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    h_deg = h * 360
+    if s < 0.25 or v < 0.20:
+        return "Black"
+    if h_deg < 25 or h_deg >= 335:
+        return "Red"
+    if h_deg < 65:
+        return "Yellow"
+    if h_deg < 165:
+        return "Green"
+    if h_deg < 265:
+        return "Blue"
+    return "Purple"
+
+
+def _find_playmat(leader_code: str, cards_dir: str, playmats_dir: str) -> Optional[str]:
+    path = card_image_path(leader_code, cards_dir)
+    if not path or not playmats_dir:
+        return None
+    img = Image.open(path).convert("RGB")
+    top2 = _top_vivid_colors(img, 2)
+    c1 = _rgb_to_optcg_color(*top2[0])
+    c2 = _rgb_to_optcg_color(*top2[1])
+    candidates = []
+    if c1 != c2:
+        candidates += [f"{c1}{c2}.png", f"{c2}{c1}.png"]
+    candidates += [f"{c1}.png", f"{c2}.png", "Playsheet.jpg"]
+    for name in candidates:
+        p = os.path.join(playmats_dir, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def create_decklist_image(
+    deck_path: str, cards_dir: str, output_path: str,
+    playmats_dir: Optional[str] = None,
+    canvas_w: int = 1920, canvas_h: int = 1080,
+) -> bool:
+    entries = parse_decklist(deck_path)
+    if not entries:
+        print(f"  [WARN] No cards parsed from {deck_path}")
+        return False
+
+    leader_code  = entries[0][1]
+    deck_entries = entries[1:]
+    n = len(deck_entries)
+    if n == 0:
+        return False
+
+    PAD          = 28
+    LEADER_W     = 460
+    STACK_OFFSET = 6
+    CELL_PAD     = 10
+
+    font_badge = load_font(FONT_PATH_IMPACT, 30)
+    font_code  = load_font(FONT_PATH_IMPACT, 18)
+
+    # ── Background: playmat matched to leader ─────────────────────────────────
+    playmat_path = _find_playmat(leader_code, cards_dir, playmats_dir or "")
+    if playmat_path and os.path.isfile(playmat_path):
+        pm = Image.open(playmat_path).convert("RGBA")
+        # Fill canvas (crop-to-fill so no letterboxing)
+        pm_ratio  = pm.width / pm.height
+        cv_ratio  = canvas_w / canvas_h
+        if pm_ratio > cv_ratio:
+            new_h = canvas_h
+            new_w = int(pm.width * canvas_h / pm.height)
+        else:
+            new_w = canvas_w
+            new_h = int(pm.height * canvas_w / pm.width)
+        pm = pm.resize((new_w, new_h), Image.LANCZOS)
+        ox = (new_w - canvas_w) // 2
+        oy = (new_h - canvas_h) // 2
+        canvas = pm.crop((ox, oy, ox + canvas_w, oy + canvas_h)).copy()
+        # Dark overlay for card readability
+        overlay = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 165))
+        canvas.alpha_composite(overlay)
+    else:
+        canvas = Image.new("RGBA", (canvas_w, canvas_h), (10, 10, 15, 255))
+
+    # ── Leader (left panel, full card, no label) ──────────────────────────────
+    leader_path = card_image_path(leader_code, cards_dir)
+    if leader_path:
+        limg    = Image.open(leader_path).convert("RGBA")
+        avail_w = LEADER_W - 2 * PAD
+        avail_h = canvas_h - 2 * PAD
+        scale   = min(avail_w / limg.width, avail_h / limg.height)
+        lw, lh  = int(limg.width * scale), int(limg.height * scale)
+        limg    = limg.resize((lw, lh), Image.LANCZOS)
+        lx      = PAD + (avail_w - lw) // 2
+        ly      = PAD + (avail_h - lh) // 2
+
+        color = dominant_color(limg)
+        glow  = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        glow.paste(Image.new("RGBA", (lw, lh), (*color, 160)), (lx, ly), limg)
+        canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(radius=45)))
+        canvas.alpha_composite(limg, (lx, ly))
+
+    # Subtle vertical divider
+    ImageDraw.Draw(canvas).line(
+        [(LEADER_W + 6, PAD), (LEADER_W + 6, canvas_h - PAD)],
+        fill=(180, 180, 200, 100), width=2,
+    )
+
+    # ── Deck cards (right panel, full card, stacked by count) ─────────────────
+    right_x = LEADER_W + 20
+    right_w  = canvas_w - right_x - PAD
+    cols     = 5
+    rows     = math.ceil(n / cols)
+    cell_w   = right_w  // cols
+    cell_h   = canvas_h // rows
+
+    for idx, (count, card_code) in enumerate(deck_entries):
+        col_i  = idx % cols
+        row_i  = idx // cols
+        cell_x = right_x + col_i * cell_w
+        cell_y = row_i * cell_h
+        avail_w = cell_w - 2 * CELL_PAD
+        avail_h = cell_h - 2 * CELL_PAD
+
+        path = card_image_path(card_code, cards_dir)
+        if not path:
+            draw = ImageDraw.Draw(canvas)
+            draw.rectangle([cell_x + CELL_PAD, cell_y + CELL_PAD,
+                            cell_x + cell_w - CELL_PAD, cell_y + cell_h - CELL_PAD],
+                           fill=(30, 30, 40, 200))
+            draw.text((cell_x + cell_w // 2, cell_y + cell_h // 2), card_code,
+                      font=font_code, fill=(120, 120, 140), anchor="mm")
+            continue
+
+        card = Image.open(path).convert("RGBA")
+        stack_extra = (count - 1) * STACK_OFFSET
+        max_cw = avail_w - stack_extra
+        max_ch = avail_h - stack_extra
+        scale  = min(max_cw / card.width, max_ch / card.height)
+        cw     = int(card.width  * scale)
+        ch     = int(card.height * scale)
+        card   = card.resize((cw, ch), Image.LANCZOS)
+        color  = dominant_color(card)
+
+        total_w = cw + stack_extra
+        total_h = ch + stack_extra
+        front_x = cell_x + CELL_PAD + (avail_w - total_w) // 2
+        front_y = cell_y + CELL_PAD + (avail_h - total_h) // 2
+
+        for copy_i in range(count - 1, -1, -1):
+            ox = copy_i * STACK_OFFSET
+            oy = copy_i * STACK_OFFSET
+            cx = front_x + ox
+            cy = front_y + oy
+            if copy_i > 0:
+                darkened = card.copy()
+                darkened.alpha_composite(
+                    Image.new("RGBA", (cw, ch), (0, 0, 0, min(60 + copy_i * 28, 160)))
+                )
+                canvas.alpha_composite(darkened, (cx, cy))
+            else:
+                glow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+                glow.paste(Image.new("RGBA", (cw, ch), (*color, 80)), (cx, cy), card)
+                canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(radius=10)))
+                canvas.alpha_composite(card, (cx, cy))
+
+        draw       = ImageDraw.Draw(canvas)
+        badge_text = f"{count}x"
+        bbox       = font_badge.getbbox(badge_text)
+        tw, th     = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        bx0        = front_x + 4
+        by0        = front_y + ch - th - 10
+        draw.rounded_rectangle([bx0 - 2, by0 - 4, bx0 + tw + 14, by0 + th + 6],
+                               radius=5, fill=(0, 0, 0, 210))
+        draw.text((bx0 + 7, by0), badge_text, font=font_badge, fill=(220, 220, 235))
+
+    canvas.convert("RGB").save(output_path, "JPEG", quality=95)
+    print(f"  Decklist image: {output_path}")
+    return True
+
+
+def prepend_image_to_clip(clip_path: str, image_path: str, duration: float = 3.0) -> None:
+    tmp = clip_path + ".intro.mp4"
+    filter_complex = (
+        f"[0:v][1:v]scale2ref=iw:ih[img_s][game];"
+        f"[img_s]setsar=1,trim=duration={duration},setpts=PTS-STARTPTS[intro_v];"
+        f"aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration={duration}[intro_a];"
+        f"[intro_v][intro_a][game][1:a]concat=n=2:v=1:a=1[v][a]"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-framerate", "30", "-i", image_path,
+        "-i", clip_path,
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k",
+        tmp,
+    ]
+    code, _, err = run_cmd(cmd)
+    if code == 0:
+        os.replace(tmp, clip_path)
+        print(f"  Intro prepended: {os.path.basename(clip_path)}")
+    else:
+        print(f"  [WARN] Failed to prepend intro: {err[:200]}", file=sys.stderr)
+        if os.path.isfile(tmp):
+            os.remove(tmp)
+
+
 # ── argument parsing and main ─────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -980,6 +1213,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-match",      action="store_true", help="Skip log matching")
     p.add_argument("--no-thumbnails", action="store_true", help="Skip thumbnail generation")
     p.add_argument("--dump-ocr",      action="store_true", help="Write raw OCR to ocr_dump.txt")
+    p.add_argument("--decklist",      default=None,
+                   help="Path to .deck file; builds a decklist image and prepends 3s to each clip")
+    p.add_argument("--decklist-duration", type=float, default=3.0,
+                   help="Seconds to show the decklist intro (default 3)")
+    p.add_argument("--playmats-dir", default=None,
+                   help="Directory of playmat PNGs (auto-detected from cards-dir if omitted)")
 
     return p.parse_args()
 
@@ -1003,6 +1242,13 @@ def main() -> int:
 
     timer_box = (args.timer_left, args.timer_top, args.timer_right, args.timer_bottom)
     chat_box  = (args.chat_left,  args.chat_top,  args.chat_right,  args.chat_bottom)
+
+    # Auto-detect playmats_dir next to cards_dir if not provided
+    playmats_dir = args.playmats_dir
+    if not playmats_dir and args.cards_dir:
+        candidate = os.path.join(os.path.dirname(args.cards_dir.rstrip("/\\")), "Playmats")
+        if os.path.isdir(candidate):
+            playmats_dir = candidate
 
     # ── stage 1: detect ───────────────────────────────────────────────────────
     print(f"\n{'='*60}")
@@ -1094,6 +1340,23 @@ def main() -> int:
     with open(matched_json, "w", encoding="utf-8") as f:
         json.dump(seg_dicts, f, indent=2)
     print(f"[INFO] Written: {matched_json}")
+
+    # ── decklist intro ────────────────────────────────────────────────────────
+    if args.decklist and not args.no_cut:
+        print(f"\n{'='*60}")
+        print(f"[STAGE 2b] Prepending decklist intro")
+        print(f"{'='*60}")
+        if not os.path.isfile(args.decklist):
+            print(f"[WARN] Decklist not found: {args.decklist} — skipping")
+        elif not args.cards_dir or not os.path.isdir(args.cards_dir):
+            print("[WARN] --cards-dir required for decklist image — skipping")
+        else:
+            decklist_img = os.path.join(args.output_dir, "decklist.jpg")
+            if create_decklist_image(args.decklist, args.cards_dir, decklist_img, playmats_dir):
+                for seg in seg_dicts:
+                    clip = seg.get("clip_file")
+                    if clip and os.path.isfile(clip):
+                        prepend_image_to_clip(clip, decklist_img, args.decklist_duration)
 
     # ── stage 3: thumbnails ───────────────────────────────────────────────────
     if not args.no_thumbnails:
