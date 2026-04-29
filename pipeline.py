@@ -458,7 +458,7 @@ def cut_clips(
 # ── stage 2: log matching ─────────────────────────────────────────────────────
 
 _ROOM_ID_RE = re.compile(
-    r'(?:connect(?:ion)?\s+(?:to\s+|with\s+room\s+id\s*[:\s]\s*))([A-Z0-9]{4,12})',
+    r'(?:connect(?:ing|ion)?\s+(?:to\s*|with\s+room\s+id\s*[:\s]\s*))([A-Z0-9]{4,12})',
     re.IGNORECASE,
 )
 _LEADER_RE = re.compile(r'Leader is ([^[<\n]+?) \[', re.IGNORECASE)
