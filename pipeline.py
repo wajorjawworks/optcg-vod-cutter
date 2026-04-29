@@ -522,10 +522,10 @@ def build_log_index(log_dir: str) -> Dict[str, List[Path]]:
     index: Dict[str, List[Path]] = {}
     for log_path in sorted(Path(log_dir).glob("*.log")):
         try:
-            first_line = log_path.read_text(encoding="utf-8", errors="ignore").split("\n")[0]
+            text = log_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        room_id = extract_room_id(first_line)
+        room_id = extract_room_id(text)
         if room_id:
             index.setdefault(room_id, []).append(log_path)
     return index
@@ -696,7 +696,7 @@ def match_logs(
         p for p in all_logs
         if str(p) not in used_source_logs
         and (not matched_dates or p.name[:10] in matched_dates)
-        and extract_room_id(p.read_text(encoding="utf-8", errors="ignore").split("\n")[0])
+        and extract_room_id(p.read_text(encoding="utf-8", errors="ignore"))
     ]
 
     if unmatched_segs and unmatched_logs:
