@@ -472,7 +472,14 @@ def extract_room_id(text: str) -> Optional[str]:
 def extract_leaders(log_path: str) -> List[str]:
     try:
         text = Path(log_path).read_text(encoding="utf-8", errors="ignore")
-        return [m.group(1).strip() for m in _LEADER_RE.finditer(text)]
+        seen: List[str] = []
+        for m in _LEADER_RE.finditer(text):
+            name = m.group(1).strip()
+            if name not in seen:
+                seen.append(name)
+            if len(seen) == 2:
+                break
+        return seen
     except Exception:
         return []
 
