@@ -752,12 +752,15 @@ def parse_log_for_thumbnail(log_path: str) -> List[dict]:
     leader_map: dict = {}
     for m in _LEADER_LINE_RE.finditer(text):
         player = _norm_player(m.group(1))
-        leader_map[player] = {
-            "player": player,
-            "name": m.group(2).strip(),
-            "card_code": m.group(3),
-            "went_first": None,
-        }
+        if player not in leader_map:
+            if len(leader_map) == 2:
+                break  # stop at first 2 unique players (one game = 2 leaders)
+            leader_map[player] = {
+                "player": player,
+                "name": m.group(2).strip(),
+                "card_code": m.group(3),
+                "went_first": None,
+            }
     for m in _CHOSE_RE.finditer(text):
         player = _norm_player(m.group(1))
         order = m.group(2).lower()
