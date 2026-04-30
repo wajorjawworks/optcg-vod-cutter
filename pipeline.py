@@ -469,9 +469,11 @@ def extract_room_id(text: str) -> Optional[str]:
     return m.group(1).upper() if m else None
 
 
-def extract_leaders(log_path: str) -> List[str]:
+def extract_leaders(log_path: str, offset: int = 0) -> List[str]:
     try:
         text = Path(log_path).read_text(encoding="utf-8", errors="ignore")
+        if offset:
+            text = text[offset:]
         seen: List[str] = []
         for m in _LEADER_RE.finditer(text):
             name = m.group(1).strip()
@@ -518,16 +520,19 @@ def fuzzy_lookup_room_id(
     return (best_id, best_matches) if best_id is not None else None
 
 
-def build_log_index(log_dir: str) -> Dict[str, List[Path]]:
-    index: Dict[str, List[Path]] = {}
+def build_log_index(log_dir: str) -> Dict[str, List[Tuple[Path, int]]]:
+    """Index all room IDs found in each log file with their character offset.
+    A single log file can contain multiple sessions (one room ID per session).
+    """
+    index: Dict[str, List[Tuple[Path, int]]] = {}
     for log_path in sorted(Path(log_dir).glob("*.log")):
         try:
             text = log_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        room_id = extract_room_id(text)
-        if room_id:
-            index.setdefault(room_id, []).append(log_path)
+        for m in _ROOM_ID_RE.finditer(text):
+            room_id = m.group(1).upper()
+            index.setdefault(room_id, []).append((log_path, m.start()))
     return index
 
 
@@ -650,8 +655,8 @@ def match_logs(
         if len(matches) > 1:
             print(f"  [INFO] {len(matches)} log files share this room ID — using earliest")
 
-        best = matches[0]
-        leaders = extract_leaders(str(best))
+        best_path, best_offset = matches[0]
+        leaders = extract_leaders(str(best_path), best_offset)
         slug = leaders_to_slug(leaders)
         print(f"  Leaders: {' vs '.join(leaders) if leaders else 'unknown'}")
 
@@ -670,13 +675,15 @@ def match_logs(
             print(f"  [WARN] No clip found for game {idx:02d}")
             new_clip = seg.get("clip_file", new_clip)
 
+        # Copy only the session slice so downstream leader/thumbnail parsing is correct
         dest_log = os.path.join(output_dir, f"game_{idx:02d}_{slug}.log")
-        shutil.copy2(str(best), dest_log)
-        print(f"  Log: {best.name} -> {os.path.basename(dest_log)}")
+        session_text = best_path.read_text(encoding="utf-8", errors="ignore")[best_offset:]
+        Path(dest_log).write_text(session_text, encoding="utf-8", errors="ignore")
+        print(f"  Log: {best_path.name} -> {os.path.basename(dest_log)}")
 
         seg.update(
             log_file=dest_log,
-            log_files_all=[str(p) for p in matches],
+            log_files_all=[str(p) for p, _ in matches],
             leaders=leaders,
             clip_file=new_clip,
         )
